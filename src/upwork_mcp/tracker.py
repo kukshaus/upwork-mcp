@@ -46,9 +46,18 @@ def has_bid(job_url_or_id: str) -> bool:
     jid = job_id_from_url(job_url_or_id) or job_url_or_id
     conn = _connect()
     try:
-        return conn.execute("SELECT 1 FROM bids WHERE job_id = ?", (jid,)).fetchone() is not None
+        return conn.execute(
+            "SELECT 1 FROM bids WHERE job_id IN (?, ?, ?)", _id_variants(jid)
+        ).fetchone() is not None
     finally:
         conn.close()
+
+
+def _id_variants(jid: str) -> tuple[str, str, str]:
+    """A job id may be stored with or without the leading '~' (manual inserts
+    have historically dropped it). Match all forms so dedup never misses."""
+    bare = (jid or "").lstrip("~")
+    return (jid, bare, "~" + bare)
 
 
 def get_bid(job_url_or_id: str) -> dict | None:
@@ -56,7 +65,9 @@ def get_bid(job_url_or_id: str) -> dict | None:
     jid = job_id_from_url(job_url_or_id) or job_url_or_id
     conn = _connect()
     try:
-        row = conn.execute("SELECT * FROM bids WHERE job_id = ?", (jid,)).fetchone()
+        row = conn.execute(
+            "SELECT * FROM bids WHERE job_id IN (?, ?, ?) LIMIT 1", _id_variants(jid)
+        ).fetchone()
         return dict(row) if row else None
     finally:
         conn.close()
