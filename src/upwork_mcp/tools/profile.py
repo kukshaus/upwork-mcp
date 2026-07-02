@@ -1,119 +1,177 @@
 """Profile and connects tools for Upwork MCP."""
 
+import asyncio
+import re
+
 from ..browser.client import get_browser
+
+
+async def _wait_rendered(page, needle: str | None = None, tries: int = 12) -> str:
+    """Poll until the page has meaningful rendered text (SPA hydration)."""
+    text = ""
+    for _ in range(tries):
+        await asyncio.sleep(2)
+        text = await page.evaluate("() => document.body.innerText")
+        if text and len(text) > 150 and "can't find this page" not in text:
+            if needle is None or needle in text:
+                break
+    return text or ""
+
+
+async def _resolve_profile_url(page) -> str | None:
+    """Find the logged-in freelancer's own profile URL (/freelancers/~<id>)."""
+    await page.goto("https://www.upwork.com/nx/find-work/best-matches", wait_until="domcontentloaded")
+    await _wait_rendered(page)
+    href = await page.evaluate(
+        """() => {
+            const a = document.querySelector("a[href*='/freelancers/~']");
+            return a ? a.getAttribute('href') : null;
+        }"""
+    )
+    if not href:
+        # Fallback: the custom profile URL is printed on the settings page
+        await page.goto("https://www.upwork.com/freelancers/settings/profile", wait_until="domcontentloaded")
+        body = await _wait_rendered(page)
+        m = re.search(r"/freelancers/~[0-9a-f]+", body)
+        href = m.group(0) if m else None
+    if not href:
+        return None
+    href = href.split("?")[0]
+    return href if href.startswith("http") else f"https://www.upwork.com{href}"
 
 
 async def get_my_profile() -> dict:
     """Get your Upwork freelancer profile information.
 
-    Returns profile data including name, title, hourly rate, JSS score,
-    availability status, and skill tags.
+    Returns profile data including name, title, hourly rate, availability,
+    location, overview, and skill tags.
     """
     browser = get_browser()
     await browser.ensure_logged_in()
     page = await browser.get_page()
 
-    await page.goto("https://www.upwork.com/freelancers/settings/profile", wait_until="networkidle")
+    profile_url = await _resolve_profile_url(page)
+    if not profile_url:
+        return {"error": "Could not locate profile URL while logged in."}
 
-    profile = {}
+    profile: dict = {"profile_url": profile_url}
 
-    # Name
-    name_el = await page.query_selector('[data-test="profile-name"], h1, .profile-name')
-    if name_el:
-        profile["name"] = (await name_el.text_content() or "").strip()
+    await page.goto(profile_url, wait_until="domcontentloaded")
+    text = await _wait_rendered(page, needle="/hr")
 
-    # Professional title
-    title_el = await page.query_selector('[data-test="profile-title"], .profile-title, [data-cy="title"]')
-    if title_el:
-        profile["title"] = (await title_el.text_content() or "").strip()
+    # Name / location come from microdata; fall back to the <title> tag.
+    micro = await page.evaluate(
+        """() => {
+            const g = p => document.querySelector(`[itemprop='${p}']`)?.textContent?.trim() || null;
+            return { name: g('name'), locality: g('locality'), country: g('country-name') };
+        }"""
+    )
 
-    # Hourly rate
-    rate_el = await page.query_selector('[data-test="hourly-rate"], .hourly-rate, [data-cy="rate"]')
-    if rate_el:
-        profile["hourly_rate"] = (await rate_el.text_content() or "").strip()
+    # <title> format: "{name} - {title} - Upwork Freelancer from {location}"
+    title_tag = await page.title()
+    tm = re.match(r"^(.*?) - (.*?) - Upwork Freelancer from (.*?)$", title_tag or "")
 
-    # Profile overview/bio
-    overview_el = await page.query_selector('[data-test="profile-overview"], .profile-overview, [data-cy="overview"]')
-    if overview_el:
-        profile["overview"] = (await overview_el.text_content() or "").strip()
+    profile["name"] = micro.get("name") or (tm.group(1).strip() if tm else None)
 
-    # Skills
-    skill_els = await page.query_selector_all('[data-test="skill"], .skill-badge, .air3-token')
-    profile["skills"] = []
-    for el in skill_els:
-        text = await el.text_content()
-        if text:
-            profile["skills"].append(text.strip())
+    if micro.get("locality") and micro.get("country"):
+        profile["location"] = f"{micro['locality']}, {micro['country']}"
+    elif tm:
+        profile["location"] = tm.group(3).strip()
 
-    # Now get stats from a different page
-    await page.goto("https://www.upwork.com/nx/find-work/best-matches", wait_until="networkidle")
+    if tm:
+        profile["title"] = tm.group(2).strip()
 
-    # Try to get JSS from sidebar or header
-    jss_el = await page.query_selector('[data-test="jss"], .jss-score, [data-cy="jss"]')
-    if jss_el:
-        profile["job_success_score"] = (await jss_el.text_content() or "").strip()
+    # Hourly rate, e.g. "$43.00/hr"
+    rate = re.search(r"\$\d+(?:\.\d+)?\s*/\s*hr", text)
+    if rate:
+        profile["hourly_rate"] = rate.group(0).replace(" ", "")
 
     # Availability badge
-    avail_el = await page.query_selector('[data-test="availability"], .availability-badge')
-    if avail_el:
-        profile["availability"] = (await avail_el.text_content() or "").strip()
+    if "Available now" in text:
+        profile["availability"] = "Available now"
+    elif "Offline" in text:
+        profile["availability"] = "Offline"
 
-    # Profile completeness
-    complete_el = await page.query_selector('[data-test="profile-completeness"], .profile-complete')
-    if complete_el:
-        profile["profile_completeness"] = (await complete_el.text_content() or "").strip()
+    # Job Success Score (absent for newer freelancers)
+    jss = re.search(r"(\d+)%\s*Job Success", text)
+    if jss:
+        profile["job_success_score"] = f"{jss.group(1)}%"
 
-    # Get connects balance
-    connects = await get_connects_balance()
-    profile["connects"] = connects
+    # Overview / bio — the longest line-clamped block on the profile
+    overview = await page.evaluate(
+        """() => {
+            let best = '';
+            document.querySelectorAll("[class*='line-clamp']").forEach(e => {
+                const t = (e.textContent || '').replace(/\\s+/g, ' ').trim();
+                if (t.length > best.length) best = t;
+            });
+            return best;
+        }"""
+    )
+    if overview and len(overview) > 40:
+        profile["overview"] = overview.strip()
+
+    # Skills
+    skills = await page.evaluate(
+        """() => [...new Set(
+            [...document.querySelectorAll('.skill-name')]
+                .map(e => (e.textContent || '').replace(/\\s+/g, ' ').trim())
+                .filter(Boolean)
+        )]"""
+    )
+    profile["skills"] = skills
+
+    # Connects balance (separate page)
+    await asyncio.sleep(3)
+    profile["connects"] = await get_connects_balance()
 
     return profile
 
 
 async def get_connects_balance() -> dict:
-    """Get current Upwork Connects balance and usage.
+    """Get current Upwork Connects balance.
 
-    Returns the number of available connects, pending connects,
-    and connects balance details.
+    Returns the number of available connects.
     """
     browser = get_browser()
     await browser.ensure_logged_in()
     page = await browser.get_page()
 
-    # Navigate to connects page
-    await page.goto("https://www.upwork.com/nx/plans/connects/balance", wait_until="networkidle")
+    connects: dict = {}
 
-    connects = {}
+    # The Connects History page shows the balance as e.g. "110 Connects".
+    await page.goto("https://www.upwork.com/nx/plans/connects/history", wait_until="domcontentloaded")
+    await _wait_rendered(page, needle="Connects")
 
-    # Available connects
-    available_el = await page.query_selector('[data-test="connects-available"], .connects-balance, [data-cy="available-connects"]')
-    if available_el:
-        text = (await available_el.text_content() or "").strip()
-        # Extract number
-        import re
-        numbers = re.findall(r'\d+', text)
+    balance = await page.evaluate(
+        """() => {
+            const els = [...document.querySelectorAll('h1,h2,h3,strong,span,div')];
+            for (const e of els) {
+                const t = (e.textContent || '').replace(/\\s+/g, ' ').trim();
+                if (/^[\\d,]+\\s+Connects$/i.test(t) && e.querySelectorAll('*').length <= 1) {
+                    return t;
+                }
+            }
+            return null;
+        }"""
+    )
+
+    # Fallback: the Connects Hub shows the number in a .title-large element.
+    if not balance:
+        await asyncio.sleep(2)
+        await page.goto("https://www.upwork.com/nx/plans/connects/", wait_until="domcontentloaded")
+        await _wait_rendered(page)
+        balance = await page.evaluate(
+            """() => {
+                const e = document.querySelector('.title-large');
+                return e ? (e.textContent || '').trim() : null;
+            }"""
+        )
+
+    if balance:
+        numbers = re.findall(r"\d[\d,]*", balance)
         if numbers:
-            connects["available"] = int(numbers[0])
-
-    # If we couldn't find it, try the header/sidebar on main page
-    if "available" not in connects:
-        await page.goto("https://www.upwork.com/nx/find-work/", wait_until="networkidle")
-        connects_el = await page.query_selector('[data-test="connects-count"], .connects-count')
-        if connects_el:
-            text = (await connects_el.text_content() or "").strip()
-            import re
-            numbers = re.findall(r'\d+', text)
-            if numbers:
-                connects["available"] = int(numbers[0])
-
-    # Try to get additional connects info
-    pending_el = await page.query_selector('[data-test="pending-connects"]')
-    if pending_el:
-        text = (await pending_el.text_content() or "").strip()
-        import re
-        numbers = re.findall(r'\d+', text)
-        if numbers:
-            connects["pending"] = int(numbers[0])
+            connects["available"] = int(numbers[0].replace(",", ""))
 
     return connects
 
@@ -121,35 +179,36 @@ async def get_connects_balance() -> dict:
 async def get_profile_stats() -> dict:
     """Get profile statistics including earnings and work history.
 
-    Returns stats like total earnings, hours worked, jobs completed.
+    Returns stats like job success score, total earnings, hours worked, and
+    jobs completed. Newer freelancers may have few or none of these.
     """
     browser = get_browser()
     await browser.ensure_logged_in()
     page = await browser.get_page()
 
-    # Navigate to work diary or stats page
-    await page.goto("https://www.upwork.com/nx/wm/contracts", wait_until="networkidle")
+    profile_url = await _resolve_profile_url(page)
+    if not profile_url:
+        return {"error": "Could not locate profile URL while logged in."}
 
-    stats = {}
+    await page.goto(profile_url, wait_until="domcontentloaded")
+    text = await _wait_rendered(page, needle="/hr")
 
-    # Total earnings
-    earnings_el = await page.query_selector('[data-test="total-earnings"], .earnings-total')
-    if earnings_el:
-        stats["total_earnings"] = (await earnings_el.text_content() or "").strip()
+    stats: dict = {}
 
-    # Active contracts count
-    active_el = await page.query_selector('[data-test="active-contracts"], .active-count')
-    if active_el:
-        stats["active_contracts"] = (await active_el.text_content() or "").strip()
+    jss = re.search(r"(\d+)%\s*Job Success", text)
+    if jss:
+        stats["job_success_score"] = f"{jss.group(1)}%"
 
-    # Total hours
-    hours_el = await page.query_selector('[data-test="total-hours"], .hours-total')
-    if hours_el:
-        stats["total_hours"] = (await hours_el.text_content() or "").strip()
+    earnings = re.search(r"\$[\d.,]+[KMB]?\+?\s*(?:total earnings|earned|Total earned)", text, re.I)
+    if earnings:
+        stats["total_earnings"] = earnings.group(0).strip()
 
-    # Jobs completed
-    jobs_el = await page.query_selector('[data-test="jobs-completed"], .jobs-count')
-    if jobs_el:
-        stats["jobs_completed"] = (await jobs_el.text_content() or "").strip()
+    hours = re.search(r"([\d,]+)\s*(?:total hours|hours worked)", text, re.I)
+    if hours:
+        stats["total_hours"] = hours.group(1).strip()
+
+    jobs = re.search(r"([\d,]+)\s*(?:total jobs|jobs? completed|completed jobs)", text, re.I)
+    if jobs:
+        stats["jobs_completed"] = jobs.group(1).strip()
 
     return stats

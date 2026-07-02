@@ -90,8 +90,11 @@ Add to your MCP settings (`~/.config/claude-code/settings.json` or workspace set
 | `upwork_get_profile_stats` | Get earnings and work history stats |
 | `upwork_get_proposals` | Get your submitted proposals |
 | `upwork_get_proposal_details` | Get details of a specific proposal |
-| `upwork_submit_proposal` | Submit a proposal to a job |
+| `upwork_submit_proposal` | Submit a proposal (duplicate-guarded; handles fixed-price + hourly forms, screening answers, confirmation dialog) |
 | `upwork_withdraw_proposal` | Withdraw a submitted proposal |
+| `upwork_check_already_applied` | Check the local bid tracker before applying (never bid twice) |
+| `upwork_list_bids` | List locally-tracked bids |
+| `upwork_check_proposal_updates` | Diff each proposal's Insights (opened / shortlisted / messaged) vs. last saved state — reports what changed |
 | `upwork_get_messages` | Get inbox conversations |
 | `upwork_get_conversation` | Get messages in a conversation |
 | `upwork_send_message` | Send a message |
@@ -203,6 +206,10 @@ uvx upwork-mcp --no-headless
 # Install Chromium for Patchright
 uvx patchright install chromium
 ```
+
+## Responsible use
+
+Personal project, not affiliated with Upwork. It automates a browser against **your own** account and is intended to run with a human in the loop — sensitive actions (submitting proposals, sending messages) spend Connects and contact real clients, so keep them behind explicit approval and reasonable rate limits. Review and follow Upwork's Terms of Service before using it. The local bid tracker exists specifically to avoid duplicate applications.
 
 ## License
 

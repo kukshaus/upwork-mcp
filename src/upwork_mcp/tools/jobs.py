@@ -34,8 +34,9 @@ async def search_jobs(params: JobSearchParams) -> list[dict]:
     browser = get_browser()
     page = await browser.get_page()
 
-    # Build search URL
-    base_url = "https://www.upwork.com/nx/find-work/best-matches"
+    # Build search URL — use the dedicated job search page (the best-matches
+    # feed ignores the query). Job tiles render as article[data-test='JobTile'].
+    base_url = "https://www.upwork.com/nx/search/jobs/"
     query_params = {"q": params.query}
 
     if params.job_type:
@@ -48,72 +49,99 @@ async def search_jobs(params: JobSearchParams) -> list[dict]:
             query_params["contractor_tier"] = level
 
     url = f"{base_url}?{urllib.parse.urlencode(query_params)}"
-    await page.goto(url, wait_until="networkidle")
-    await asyncio.sleep(3)
+
+    # The search page is client-side rendered and sits behind Cloudflare. Tile
+    # hydration time varies widely (sometimes >15s). Navigate once, then poll for
+    # tiles up to ~45s rather than reloading — a reload just restarts the slow
+    # render. Only re-navigate if a Cloudflare "Just a moment..." challenge shows.
+    tiles = []
+    for nav in range(2):
+        await page.goto(url, wait_until="domcontentloaded")
+
+        for _ in range(22):  # poll ~45s
+            await asyncio.sleep(2)
+            tiles = await page.query_selector_all("article[data-test='JobTile']")
+            if tiles:
+                break
+
+        if tiles:
+            break
+
+        # Still nothing — if it's a Cloudflare interstitial, wait and re-navigate.
+        title = (await page.title() or "").lower()
+        if "moment" in title:
+            await asyncio.sleep(8)
+        else:
+            break
 
     jobs = []
 
-    # Get job sections (each section contains one job)
-    sections = await page.query_selector_all("section")
-
-    for section in sections[:params.limit * 2]:  # Check more sections
+    for tile in tiles[:params.limit]:
         try:
             job = {}
 
-            # Get title from h3 or h4 link
-            title_link = await section.query_selector("h3 a, h4 a")
+            # Title + URL from the title link
+            title_link = await tile.query_selector("h2 a, [data-test*='job-tile-title-link']")
             if not title_link:
                 continue
 
             title = await title_link.text_content()
             href = await title_link.get_attribute("href")
-
-            if not title or not href or "/jobs/" not in href:
+            if not title or not href:
                 continue
 
-            job["title"] = title.strip()
-            job["url"] = f"https://www.upwork.com{href}" if href.startswith("/") else href
+            # Strip query string from href for a clean job URL
+            clean_href = href.split("?")[0]
+            job["title"] = " ".join(title.split()).strip()
+            job["url"] = (
+                f"https://www.upwork.com{clean_href}"
+                if clean_href.startswith("/")
+                else clean_href
+            )
 
-            # Get description snippet
-            desc_el = await section.query_selector("p, [data-test='job-description-text']")
+            # Description snippet
+            desc_el = await tile.query_selector("[data-test*='JobDescription']")
             if desc_el:
                 desc = await desc_el.text_content()
                 if desc:
-                    job["description"] = desc.strip()[:300]
+                    job["description"] = " ".join(desc.split()).strip()[:300]
 
-            # Get budget/rate info
-            for sel in ["strong", "span"]:
-                els = await section.query_selector_all(sel)
-                for el in els:
-                    text = await el.text_content()
-                    if text and ("$" in text or "hourly" in text.lower() or "fixed" in text.lower()):
-                        job["budget"] = text.strip()
-                        break
-                if "budget" in job:
-                    break
+            # Budget / job type / experience — JobInfo holds the combined line,
+            # e.g. "Fixed price Intermediate Est. budget: $70.00"
+            info_el = await tile.query_selector("[data-test='JobInfo']")
+            if info_el:
+                job["info"] = " ".join((await info_el.text_content() or "").split()).strip()
 
-            # Get skills
-            skill_els = await section.query_selector_all("button, [class*='skill'], [class*='token']")
+            type_el = await tile.query_selector("[data-test='job-type-label']")
+            if type_el:
+                job["job_type"] = (await type_el.text_content() or "").strip()
+
+            budget_el = await tile.query_selector(
+                "[data-test='is-fixed-price'], [data-test='is-hourly']"
+            )
+            if budget_el:
+                job["budget"] = " ".join((await budget_el.text_content() or "").split()).strip()
+
+            # Skills/tokens
+            skill_els = await tile.query_selector_all("[data-test='token']")
             skills = []
-            for el in skill_els[:8]:
-                text = await el.text_content()
-                if text and len(text.strip()) > 1 and len(text.strip()) < 30:
-                    skills.append(text.strip())
+            for el in skill_els:
+                text = (await el.text_content() or "").strip()
+                if text:
+                    skills.append(text)
             if skills:
                 job["skills"] = skills
 
-            # Get posted time
-            time_els = await section.query_selector_all("span, small")
-            for el in time_els:
-                text = await el.text_content()
-                if text and ("ago" in text.lower() or "posted" in text.lower()):
-                    job["posted"] = text.strip()
-                    break
+            # Posted date + proposals tier
+            posted_el = await tile.query_selector("[data-test='job-pubilshed-date']")
+            if posted_el:
+                job["posted"] = " ".join((await posted_el.text_content() or "").split()).strip()
+
+            proposals_el = await tile.query_selector("[data-test='proposals-tier']")
+            if proposals_el:
+                job["proposals"] = (await proposals_el.text_content() or "").strip()
 
             jobs.append(job)
-
-            if len(jobs) >= params.limit:
-                break
 
         except Exception:
             continue

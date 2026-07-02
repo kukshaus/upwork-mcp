@@ -8,6 +8,7 @@ from pydantic import Field
 
 from .browser.client import get_browser, close_browser, UpworkBrowser
 from .browser.auth import login_interactive, check_session, logout
+from . import tracker
 from .tools.jobs import JobSearchParams, JobDetailsParams, search_jobs, get_job_details
 from .tools.profile import get_my_profile, get_connects_balance, get_profile_stats
 from .tools.proposals import (
@@ -17,6 +18,7 @@ from .tools.proposals import (
     get_proposal_details,
     submit_proposal,
     withdraw_proposal,
+    check_proposal_updates,
 )
 from .tools.messages import (
     MessagesParams,
@@ -301,6 +303,44 @@ async def upwork_check_session() -> dict:
         }
     except Exception as e:
         return {"logged_in": False, "error": str(e)}
+
+
+@mcp.tool()
+async def upwork_check_proposal_updates(
+    limit: Annotated[int, Field(description="Max proposals to check", ge=1, le=50)] = 20,
+) -> dict:
+    """Daily status check: detect changes on your submitted proposals.
+
+    Opens each submitted proposal and reads its Insights (did the client open
+    your proposal, and the job's hiring activity: total/opened/shortlisted/
+    messaged), then compares to the previous run and reports what CHANGED
+    (e.g. "client OPENED your proposal", "shortlisted 0→1"). Run it daily.
+    """
+    return await check_proposal_updates(limit=limit)
+
+
+@mcp.tool()
+async def upwork_list_bids(
+    limit: Annotated[int, Field(description="Maximum number of tracked bids to return", ge=1, le=200)] = 100,
+) -> list[dict]:
+    """List all proposals/bids recorded in the local tracker database.
+
+    The tracker is used to prevent duplicate applications — every successful
+    submission via upwork_submit_proposal is recorded here automatically.
+    Returns job id, title, URL, amount, connects used, status, and date.
+    """
+    return tracker.list_bids(limit=limit)
+
+
+@mcp.tool()
+async def upwork_check_already_applied(
+    job_url: Annotated[str, Field(description="Full Upwork job URL or job ID")],
+) -> dict:
+    """Check whether a bid has already been submitted for a job (duplicate guard).
+
+    Returns whether it's already applied and the previously recorded bid, if any.
+    """
+    return {"already_applied": tracker.has_bid(job_url), "bid": tracker.get_bid(job_url)}
 
 
 @mcp.tool()
