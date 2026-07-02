@@ -26,6 +26,105 @@ class JobDetailsParams(BaseModel):
     job_url: str = Field(description="Full Upwork job URL or job ID")
 
 
+async def get_best_matches(limit: int = 30) -> list[dict]:
+    """Fetch Upwork's personalized "Best Matches" feed for the logged-in user.
+
+    This is Upwork's own profile-based matching (`/nx/find-work/best-matches`),
+    complementary to keyword search — it surfaces jobs the profile matches that
+    a given query may miss. Returns the same shape as `search_jobs`
+    (title, url, proposals, posted, budget, job_type, skills, description).
+
+    The feed's tiles are `article[data-test='JobTile']` like search, but some
+    child data-test hooks differ, so we fall back to parsing the tile's text.
+    """
+    browser = get_browser()
+    page = await browser.get_page()
+
+    tiles = []
+    for _ in range(2):
+        await page.goto(
+            "https://www.upwork.com/nx/find-work/best-matches",
+            wait_until="domcontentloaded",
+        )
+        for _ in range(22):  # poll ~45s for client-side hydration
+            await asyncio.sleep(2)
+            # The feed renders tiles as either article/section[data-test='JobTile']
+            # or plain children of the job-tile list — query broadly.
+            tiles = await page.query_selector_all(
+                "article[data-test='JobTile'], section[data-test='JobTile'], "
+                "[data-test='job-tile-list'] > section, [data-test='job-tile-list'] > article"
+            )
+            if tiles:
+                break
+        if tiles:
+            break
+        title = (await page.title() or "").lower()
+        if "moment" in title:
+            await asyncio.sleep(8)
+        else:
+            break
+
+    _TIER = r"(Less than 5|Fewer than 5|5 to 10|10 to 15|15 to 20|20 to 50|50\+)"
+    _POSTED = r"(?:Posted|last week|yesterday|\d+\s+(?:minute|hour|day|week)s?\s+ago)[^\n]*"
+    _BUDGET = r"(Hourly:?\s*\$[\d.,\s\-–]+|Fixed[- ]price|Est\.?\s*budget:?\s*\$[\d.,]+|\$[\d,]+\.\d{2})"
+
+    jobs = []
+    for tile in tiles[:limit]:
+        try:
+            link = await tile.query_selector("h2 a, a[href*='/jobs/'], [data-test*='job-tile-title-link']")
+            if not link:
+                continue
+            title = await link.text_content()
+            href = await link.get_attribute("href")
+            if not title or not href:
+                continue
+            job = {
+                "title": " ".join(title.split()).strip(),
+                "url": "https://www.upwork.com" + href.split("?")[0]
+                if href.startswith("/") else href.split("?")[0],
+                "source": "best_matches",
+            }
+            text = " ".join(((await tile.text_content()) or "").split())
+
+            prop_el = await tile.query_selector("[data-test='proposals-tier']")
+            if prop_el:
+                job["proposals"] = (await prop_el.text_content() or "").strip()
+            else:
+                m = re.search(r"Proposals?:?\s*" + _TIER, text, re.I) or re.search(_TIER, text, re.I)
+                if m:
+                    job["proposals"] = m.group(1)
+
+            posted_el = await tile.query_selector("[data-test='job-pubilshed-date'], [data-test*='posted']")
+            if posted_el:
+                job["posted"] = " ".join((await posted_el.text_content() or "").split()).strip()
+            else:
+                m = re.search(_POSTED, text, re.I)
+                if m:
+                    job["posted"] = m.group(0).strip()
+
+            budget_el = await tile.query_selector("[data-test='is-fixed-price'], [data-test='is-hourly']")
+            if budget_el:
+                job["budget"] = " ".join((await budget_el.text_content() or "").split()).strip()
+            else:
+                m = re.search(_BUDGET, text, re.I)
+                if m:
+                    job["budget"] = m.group(1).strip()
+
+            skills = [
+                (await el.text_content() or "").strip()
+                for el in await tile.query_selector_all("[data-test='token']")
+            ]
+            skills = [s for s in skills if s]
+            if skills:
+                job["skills"] = skills
+
+            jobs.append(job)
+        except Exception:
+            continue
+
+    return jobs
+
+
 async def search_jobs(params: JobSearchParams) -> list[dict]:
     """Search for jobs on Upwork matching the specified criteria.
 

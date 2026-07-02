@@ -9,7 +9,7 @@ from pydantic import Field
 from .browser.client import get_browser, close_browser, UpworkBrowser
 from .browser.auth import login_interactive, check_session, logout
 from . import tracker
-from .tools.jobs import JobSearchParams, JobDetailsParams, search_jobs, get_job_details
+from .tools.jobs import JobSearchParams, JobDetailsParams, search_jobs, get_job_details, get_best_matches
 from .tools.profile import get_my_profile, get_connects_balance, get_profile_stats
 from .tools.proposals import (
     ProposalsParams,
@@ -86,6 +86,19 @@ async def upwork_get_job_details(
     """
     params = JobDetailsParams(job_url=job_url)
     return await get_job_details(params)
+
+
+@mcp.tool()
+async def upwork_get_best_matches(
+    limit: Annotated[int, Field(description="Max jobs to return", ge=1, le=50)] = 30
+) -> list[dict]:
+    """Fetch Upwork's personalized "Best Matches" feed for the logged-in user.
+
+    Upwork's own profile-based matching, complementary to keyword search — it
+    surfaces relevant jobs a query may miss. Same shape as upwork_search_jobs
+    (title, url, proposals, posted, budget, skills), each tagged source=best_matches.
+    """
+    return await get_best_matches(limit=limit)
 
 
 # ============================================================================
