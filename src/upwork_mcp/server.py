@@ -172,6 +172,7 @@ async def upwork_submit_proposal(
     rate: Annotated[float | None, Field(description="Proposed hourly rate (for hourly jobs)")] = None,
     bid: Annotated[float | None, Field(description="Bid amount (for fixed-price jobs)")] = None,
     answers: Annotated[list[str] | None, Field(description="Answers to screening questions")] = None,
+    posted_age: Annotated[str | None, Field(description="Job age at apply time, e.g. 'Posted 32 minutes ago' — stored for time-to-apply analytics")] = None,
 ) -> dict:
     """Submit a proposal to an Upwork job.
 
@@ -186,6 +187,7 @@ async def upwork_submit_proposal(
         rate=rate,
         bid=bid,
         answers=answers,
+        posted_age=posted_age,
     )
     return await submit_proposal(params)
 

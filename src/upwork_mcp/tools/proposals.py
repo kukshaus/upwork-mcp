@@ -24,6 +24,12 @@ class SubmitProposalParams(BaseModel):
     rate: float | None = Field(default=None, description="Proposed hourly rate (for hourly jobs)")
     bid: float | None = Field(default=None, description="Bid amount (for fixed-price jobs)")
     answers: list[str] | None = Field(default=None, description="Answers to screening questions")
+    posted_age: str | None = Field(
+        default=None,
+        description="Job age at apply time, e.g. 'Posted 32 minutes ago' — recorded "
+        "for time-to-apply analytics (applying <60min after posting is the single "
+        "highest-leverage timing factor for view rates)",
+    )
     estimated_duration: str = Field(
         default="1 to 3 months",
         description="Project duration for fixed-price jobs: 'Less than 1 month', "
@@ -549,6 +555,7 @@ async def submit_proposal(
             connects_used=connects_required,
             status="submitted",
             cover_letter=params.cover_letter,
+            posted_age=params.posted_age,
         )
 
     for _ in range(12):

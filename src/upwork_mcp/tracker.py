@@ -38,6 +38,12 @@ def _connect() -> sqlite3.Connection:
         )
         """
     )
+    # migration: job age at apply time ("Posted 32 minutes ago") — the research-
+    # backed highest-leverage metric (apply <60min → far higher view rates).
+    try:
+        conn.execute("ALTER TABLE bids ADD COLUMN posted_age TEXT")
+    except sqlite3.OperationalError:
+        pass  # column exists
     return conn
 
 
@@ -82,6 +88,7 @@ def record_bid(
     status: str = "submitted",
     cover_letter: str | None = None,
     submitted_at: str | None = None,
+    posted_age: str | None = None,
 ) -> str:
     """Insert or update a bid record. Returns the job id."""
     jid = job_id_from_url(url) or url
@@ -90,8 +97,8 @@ def record_bid(
     try:
         conn.execute(
             """
-            INSERT INTO bids (job_id, title, url, job_type, amount, connects_used, status, cover_letter, submitted_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO bids (job_id, title, url, job_type, amount, connects_used, status, cover_letter, submitted_at, posted_age)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(job_id) DO UPDATE SET
                 title=COALESCE(excluded.title, bids.title),
                 url=COALESCE(excluded.url, bids.url),
@@ -100,9 +107,10 @@ def record_bid(
                 connects_used=COALESCE(excluded.connects_used, bids.connects_used),
                 status=excluded.status,
                 cover_letter=COALESCE(excluded.cover_letter, bids.cover_letter),
-                submitted_at=excluded.submitted_at
+                submitted_at=excluded.submitted_at,
+                posted_age=COALESCE(excluded.posted_age, bids.posted_age)
             """,
-            (jid, title, url, job_type, amount, connects_used, status, cover_letter, ts),
+            (jid, title, url, job_type, amount, connects_used, status, cover_letter, ts, posted_age),
         )
         conn.commit()
         return jid
