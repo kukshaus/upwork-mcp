@@ -13,6 +13,19 @@ Built on [FastMCP](https://github.com/PrefectHQ/fastmcp) 4.x. Every tool carries
 - **Messages**: Read and send messages in Upwork inbox
 - **Contracts**: View active and past contracts, work diary entries
 
+## Opportunity scoring
+
+`upwork_get_job_details(job_url, my_rate=43)` returns a `score_breakdown`, adapted from the four-pillar model in [AbbottDevelopments/upwork-mcp-server](https://github.com/AbbottDevelopments/upwork-mcp-server):
+
+| Pillar | Points | Signals |
+|---|---|---|
+| Client quality | 0-25 | payment verified, hires, total spent, rating, account age |
+| Budget fit | 0-25 | hourly max vs your rate, or fixed budget in hours of your rate |
+| Competition | 0-25 | proposals tier, posting age, invites sent |
+| Skill fit | 0-25 | your own 0-100 judgment of the description, divided by 4 |
+
+`opportunity_score = subtotal_75 + round(fit_score / 4)`. Flags (`red:`, `yellow:`, `green:`) explain the score.
+
 ## How It Works
 
 This MCP uses **Chrome DevTools Protocol (CDP)** to connect to your real Chrome browser. This approach:

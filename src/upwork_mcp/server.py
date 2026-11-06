@@ -104,14 +104,18 @@ async def upwork_search_jobs(
 
 @mcp.tool(tags={"jobs"}, annotations=READ_UPWORK)
 async def upwork_get_job_details(
-    job_url: Annotated[str, Field(description="Full Upwork job URL or job ID")]
+    job_url: Annotated[str, Field(description="Full Upwork job URL or job ID")],
+    my_rate: Annotated[float | None, Field(description="Your hourly rate in USD, for the budget-fit score")] = None,
 ) -> dict:
     """Get detailed information about a specific Upwork job posting.
 
     Returns comprehensive job details including description, client history,
-    skills required, and application requirements.
+    skills required, and application requirements, plus ``score_breakdown``:
+    client_quality, budget_fit and competition (0-25 each, ``subtotal_75``) and
+    red/yellow/green flags. Add your own 0-100 skill-fit judgment as
+    ``opportunity_score = subtotal_75 + round(fit_score / 4)``.
     """
-    params = JobDetailsParams(job_url=job_url)
+    params = JobDetailsParams(job_url=job_url, my_rate=my_rate)
     return await get_job_details(params)
 
 

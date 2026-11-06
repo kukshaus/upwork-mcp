@@ -5,6 +5,7 @@ import asyncio
 import urllib.parse
 from pydantic import BaseModel, Field
 from ..browser.client import get_browser
+from ..scoring import score_job
 
 
 class JobSearchParams(BaseModel):
@@ -24,6 +25,7 @@ class JobSearchParams(BaseModel):
 class JobDetailsParams(BaseModel):
     """Parameters for getting job details."""
     job_url: str = Field(description="Full Upwork job URL or job ID")
+    my_rate: float | None = Field(default=None, description="Your hourly rate in USD, used for the budget-fit score")
 
 
 async def get_best_matches(limit: int = 30) -> list[dict]:
@@ -321,7 +323,7 @@ async def get_job_details(params: JobDetailsParams) -> dict:
     features = data.get("features") or []
     for f in features:
         low = f.lower()
-        if "$" in f and not job.get("budget"):
+        if "$" in f and not job.get("budget") and not re.search(r"spent|hires?\b|avg|member since", low):
             job["budget"] = re.sub(r"\s*\|\s*", " ", f).replace(" - ", "-").strip()
             if "hourly" in low:
                 job["job_type"] = "hourly"
@@ -377,4 +379,5 @@ async def get_job_details(params: JobDetailsParams) -> dict:
                 break
         job["client"] = client
 
+    job["score_breakdown"] = score_job(job, my_rate=params.my_rate)
     return job
