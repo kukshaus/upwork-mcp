@@ -1,5 +1,8 @@
 """Messaging tools for Upwork MCP."""
 
+import asyncio
+import re
+
 from pydantic import BaseModel, Field
 from ..browser.client import get_browser
 
@@ -26,28 +29,27 @@ async def get_messages(params: MessagesParams) -> list[dict]:
     await browser.ensure_logged_in()
     page = await browser.get_page()
 
-    # Navigate to messages
-    url = "https://www.upwork.com/nx/messages"
-    if params.unread_only:
-        url += "?filter=unread"
-
-    await page.goto(url, wait_until="networkidle")
+    # The inbox lives under /ab/messages/rooms (/nx/messages is a 404).
+    await page.goto("https://www.upwork.com/ab/messages/rooms",
+                    wait_until="domcontentloaded")
 
     conversations = []
 
-    # Wait for message list
+    # Wait for the room items themselves — the rooms panel renders before
+    # its list hydrates, so waiting on the panel races an empty list.
     try:
-        await page.wait_for_selector('[data-test="room-list"], .room-list, .message-list', timeout=10000)
+        await page.wait_for_selector('[data-test="room-list-item"]', timeout=20000)
     except Exception:
         pass
+    await asyncio.sleep(2)
 
     # Extract conversation items
-    room_els = await page.query_selector_all('[data-test="room-item"], .room-item, .conversation-item')
+    room_els = await page.query_selector_all('[data-test="room-list-item"]')
 
     for el in room_els[:params.limit]:
         try:
             conv = await _extract_conversation(el)
-            if conv:
+            if conv and (not params.unread_only or conv.get("unread")):
                 conversations.append(conv)
         except Exception:
             continue
@@ -56,45 +58,55 @@ async def get_messages(params: MessagesParams) -> list[dict]:
 
 
 async def _extract_conversation(el) -> dict | None:
-    """Extract conversation data from element."""
+    """Extract conversation data from a room-list-item element."""
     conv = {}
 
     # Contact name
-    name_el = await el.query_selector('[data-test="contact-name"], .contact-name, .sender-name')
+    name_el = await el.query_selector('[data-test="room-name"]')
     if name_el:
         conv["contact_name"] = (await name_el.text_content() or "").strip()
 
     if not conv.get("contact_name"):
         return None
 
-    # Room URL/ID
-    room_link = await el.query_selector('a[href*="/messages/"]')
-    if room_link:
-        href = await room_link.get_attribute("href")
-        if href:
-            conv["room_url"] = href if href.startswith("http") else f"https://www.upwork.com{href}"
-            # Extract room ID from URL
-            if "/messages/" in href:
-                conv["room_id"] = href.split("/messages/")[-1].split("/")[0].split("?")[0]
+    # Room URL/ID — the room link may be the item's ancestor or a child
+    href = await el.evaluate(
+        """e => {
+            const a = e.closest('a[href*="/messages/rooms/"]')
+                   || e.querySelector('a[href*="/messages/rooms/"]');
+            return a ? a.getAttribute('href') : null;
+        }"""
+    )
+    if href:
+        conv["room_url"] = href if href.startswith("http") else f"https://www.upwork.com{href}"
+        m = re.search(r"/rooms/([^/?]+)", href)
+        if m:
+            conv["room_id"] = m.group(1)
 
-    # Last message preview
-    preview_el = await el.query_selector('[data-test="message-preview"], .preview, .last-message')
-    if preview_el:
-        conv["last_message"] = (await preview_el.text_content() or "").strip()
+    # Related job / room topic
+    topic_el = await el.query_selector('[data-test="room-topic-or-subtitle"]')
+    if topic_el:
+        conv["related_job"] = (await topic_el.text_content() or "").strip()
 
     # Timestamp
-    time_el = await el.query_selector('[data-test="timestamp"], time, .time')
+    time_el = await el.query_selector('time, .time')
     if time_el:
         conv["timestamp"] = (await time_el.text_content() or "").strip()
 
-    # Unread indicator
-    unread_el = await el.query_selector('[data-test="unread"], .unread-badge, .unread-indicator')
-    conv["unread"] = unread_el is not None
+    # Last message preview: the item text minus the contact-name line
+    raw = (await el.inner_text() or "").strip()
+    lines = [ln.strip() for ln in raw.splitlines() if ln.strip()]
+    preview = [ln for ln in lines
+               if ln != conv["contact_name"]
+               and ln != conv.get("timestamp")
+               and ln != conv.get("related_job")]
+    if preview:
+        conv["last_message"] = " ".join(preview)[:300]
 
-    # Related job (if any)
-    job_el = await el.query_selector('[data-test="related-job"], .job-title')
-    if job_el:
-        conv["related_job"] = (await job_el.text_content() or "").strip()
+    # Unread indicator (badge or bolded room)
+    unread_el = await el.query_selector(
+        '[data-test="unread"], .unread-badge, .unread-indicator, [class*="unread"]')
+    conv["unread"] = unread_el is not None
 
     return conv
 
@@ -116,9 +128,13 @@ async def get_conversation_messages(room_id: str, limit: int = 50) -> dict:
     if room_id.startswith("http"):
         url = room_id
     else:
-        url = f"https://www.upwork.com/nx/messages/{room_id}"
+        url = f"https://www.upwork.com/ab/messages/rooms/{room_id}"
 
-    await page.goto(url, wait_until="networkidle")
+    # The messages SPA keeps background requests alive, so networkidle can
+    # hang indefinitely. Wait for the document, then give the room time to
+    # hydrate its message history.
+    await page.goto(url, wait_until="domcontentloaded")
+    await asyncio.sleep(5)
 
     conversation = {"room_id": room_id, "messages": []}
 
@@ -142,6 +158,14 @@ async def get_conversation_messages(room_id: str, limit: int = 50) -> dict:
                 conversation["messages"].append(msg)
         except Exception:
             continue
+
+    # Upwork's current messages UI renders chat bubbles without the legacy
+    # data-test hooks above. Preserve the visible transcript as a read-only
+    # fallback so callers can still prepare for interviews and client calls.
+    if not conversation["messages"]:
+        body_text = (await page.locator("body").inner_text()).strip()
+        if body_text:
+            conversation["transcript_text"] = body_text[-30000:]
 
     return conversation
 

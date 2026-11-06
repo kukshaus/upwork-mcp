@@ -248,92 +248,133 @@ async def search_jobs(params: JobSearchParams) -> list[dict]:
     return jobs
 
 
+_DETAILS_JS = r"""
+() => {
+  const txt = s => { const e = document.querySelector(s); return e ? e.innerText.trim() : null; };
+  const flat = t => t.split('\n').map(x => x.trim()).filter(Boolean).join(' | ');
+  const leaves = [...document.querySelectorAll('span,div,li,strong,p,small')];
+  const find = (pred) => { const e = leaves.find(el => el.innerText && pred(el.innerText.trim())); return e ? e.innerText.trim() : null; };
+  const title = txt('header h4') || txt('h4') || '';
+  const features = [...document.querySelectorAll('ul.features li, .features li')].map(e => flat(e.innerText)).filter(Boolean);
+  const skills = [...new Set([...document.querySelectorAll('[data-test=proposals-insights-v2-skill-chip], .air3-token')].map(e => e.innerText.trim()).filter(Boolean))];
+  const connectsLine = find(t => /^Send a proposal for:\s*\d+\s*Connects/i.test(t) && t.length < 120);
+  const availLine = find(t => /^Available Connects:\s*\d+/i.test(t) && t.length < 60);
+  const posted = find(t => /^Posted\b/.test(t) && t.length < 60);
+  const proposals = find(t => /^Proposals:?/i.test(t) && t.length < 60);
+  const questions = [...document.querySelectorAll('[data-test=Questions] li, .questions li')].map(e => e.innerText.trim()).filter(Boolean);
+  return {
+    title, description: txt('[data-test=Description]'),
+    client_text: txt('[data-test=about-client-container]'),
+    activity_text: txt('[data-test=proposals-insights-v2-job-activity-section]'),
+    features, skills, connectsLine, availLine, posted, proposals, questions,
+    page_title: document.title,
+  };
+}
+"""
+
+_JUNK_TITLES = ("footer navigation", "looking for something", "skip to content", "")
+
+
 async def get_job_details(params: JobDetailsParams) -> dict:
     """Get detailed information about a specific Upwork job posting.
 
-    Returns comprehensive job details including description, client history,
-    skills required, and application requirements.
+    Returns description, budget/rate, experience level, duration, skills,
+    client stats, connects required, posted age and screening questions.
+    Waits for the job description to render (the SPA can show page chrome
+    first) and returns ``{"error": "job_details_unavailable"}`` instead of
+    junk when the job content never appears.
     """
     browser = get_browser()
     page = await browser.get_page()
 
-    # Normalize URL
     url = params.job_url
     if not url.startswith("http"):
         url = f"https://www.upwork.com/jobs/{url}"
 
-    await page.goto(url, wait_until="networkidle")
-    await asyncio.sleep(3)
+    data: dict = {}
+    for attempt in range(2):
+        await page.goto(url, wait_until="domcontentloaded")
+        try:
+            await page.wait_for_selector("[data-test='Description']", timeout=15000)
+        except Exception:
+            pass
+        await asyncio.sleep(1.5)
+        data = await page.evaluate(_DETAILS_JS)
+        if data.get("description") and (data.get("title") or "").strip().lower() not in _JUNK_TITLES:
+            break
+        await asyncio.sleep(3)
 
-    job = {"url": url}
+    if not data.get("description"):
+        return {
+            "url": url,
+            "error": "job_details_unavailable",
+            "page_title": data.get("page_title"),
+            "hint": "Job content did not render (removed/private job, or not logged in).",
+        }
 
-    # Title
-    title_el = await page.query_selector("h1, h2")
-    if title_el:
-        job["title"] = (await title_el.text_content() or "").strip()
+    job: dict = {"url": url, "title": data.get("title") or (data.get("page_title") or "").split(" - ")[0]}
+    desc = data["description"]
+    if desc.startswith("Summary"):
+        desc = desc[len("Summary"):].lstrip()
+    job["description"] = desc
 
-    # Full description
-    desc_el = await page.query_selector("[data-test='description'], .description, article p")
-    if desc_el:
-        job["description"] = (await desc_el.text_content() or "").strip()
+    features = data.get("features") or []
+    for f in features:
+        low = f.lower()
+        if "$" in f and not job.get("budget"):
+            job["budget"] = re.sub(r"\s*\|\s*", " ", f).replace(" - ", "-").strip()
+            if "hourly" in low:
+                job["job_type"] = "hourly"
+            elif "fixed" in low:
+                job["job_type"] = "fixed"
+        elif low.endswith("| hourly") and not job.get("job_type"):
+            job["job_type"] = "hourly"
+            job["hours_per_week"] = f.split("|")[0].strip()
+        elif "duration" in low or "project length" in low:
+            job["project_length"] = f.split("|")[0].strip()
+        elif any(x in low for x in ("entry level", "intermediate", "expert")) and not job.get("experience_level"):
+            job["experience_level"] = f.split("|")[0].strip()
+    if not job.get("job_type") and "fixed" in " ".join(features).lower():
+        job["job_type"] = "fixed"
 
-    # Get all text blocks to find budget, experience, etc.
-    all_text = await page.query_selector_all("p, span, div")
-    for el in all_text:
-        text = await el.text_content()
-        if not text:
-            continue
-        text = text.strip()
+    if data.get("skills"):
+        job["skills"] = data["skills"][:15]
+    if data.get("posted"):
+        job["posted"] = data["posted"].splitlines()[0].strip()
+    if data.get("proposals"):
+        job["proposals"] = " ".join(data["proposals"].replace("Proposals", "").replace(":", "").split()).strip("()")
+    if data.get("questions"):
+        job["screening_questions"] = data["questions"]
+    if data.get("activity_text"):
+        job["bid_range"] = " ".join(data["activity_text"].split())
 
-        # Budget
-        if "$" in text and len(text) < 50 and not job.get("budget"):
-            job["budget"] = text
+    m = re.search(r"(\d+)\s*Connects", data.get("connectsLine") or "")
+    if m:
+        job["connects_required"] = int(m.group(1))
+    m = re.search(r"(\d+)", data.get("availLine") or "")
+    if m:
+        job["connects_available"] = int(m.group(1))
 
-        # Experience level
-        if any(x in text.lower() for x in ["entry level", "intermediate", "expert"]):
-            if not job.get("experience_level"):
-                job["experience_level"] = text
-
-        # Project length
-        if any(x in text.lower() for x in ["less than", "1 to 3", "3 to 6", "more than"]):
-            if "month" in text.lower() and not job.get("project_length"):
-                job["project_length"] = text
-
-    # Skills
-    skill_els = await page.query_selector_all("[class*='skill'], [class*='token'], button")
-    skills = []
-    for el in skill_els[:15]:
-        text = await el.text_content()
-        if text and 2 < len(text.strip()) < 30:
-            skills.append(text.strip())
-    if skills:
-        job["skills"] = list(set(skills))[:10]
-
-    # Client info
-    client = {}
-    client_section = await page.query_selector("[data-test='client-info'], [class*='client']")
-    if client_section:
-        client_text = await client_section.text_content()
-        if client_text:
-            # Look for location, rating, etc.
-            if "Payment" in client_text and "verified" in client_text.lower():
-                client["payment_verified"] = True
-            # Extract spending info
-            spent_match = re.search(r"\$[\d,]+[KMB]?\+?\s*(spent|total)", client_text, re.I)
-            if spent_match:
-                client["total_spent"] = spent_match.group(0)
-
-    if client:
-        job["client"] = client
-
-    # Connects required
-    connects_els = await page.query_selector_all("span, div")
-    for el in connects_els:
-        text = await el.text_content()
-        if text and "connect" in text.lower():
-            numbers = re.findall(r"\d+", text)
-            if numbers:
-                job["connects_required"] = int(numbers[0])
+    ct = data.get("client_text") or ""
+    if ct:
+        client: dict = {"payment_verified": "payment method verified" in ct.lower()}
+        for key, pat in (
+            ("rating", r"Rating is ([\d.]+) out of 5"),
+            ("total_spent", r"(\$[\d.,]+[KMB]?\+?) total spent"),
+            ("hire_rate", r"(\d+%) hire rate"),
+            ("jobs_posted", r"(\d+) jobs? posted"),
+            ("hires", r"(\d+) hires?"),
+            ("avg_hourly_paid", r"(\$[\d.,]+) ?/hr avg"),
+            ("member_since", r"Member since (.+)"),
+        ):
+            mm = re.search(pat, ct)
+            if mm:
+                client[key] = mm.group(1).strip()
+        lines = [l.strip() for l in ct.splitlines() if l.strip()]
+        for i2, l in enumerate(lines):
+            if re.search(r"\d+ of \d+ reviews", l) and i2 + 1 < len(lines):
+                client["country"] = lines[i2 + 1]
                 break
+        job["client"] = client
 
     return job

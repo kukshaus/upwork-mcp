@@ -235,7 +235,7 @@ async def check_proposal_updates(limit: int = 20) -> dict:
                             return {
                                 opened: openedPos ? true : (openedNeg ? false : null),
                                 hiring: m ? {total:+m[1], unopened:+m[2], opened:+m[3], shortlisted:+m[4], messaged:+m[5]} : null,
-                                interview: /interview|messaged you|sent you a message/i.test(b) && !/0\s+messaged/i.test(b) ? true : false,
+                                interview: /messaged you|sent you a message|you have a new message|\binterviewing\b|invited you to interview/i.test(b),
                                 updated: upd ? upd[1].trim() : null,
                             };
                         }"""
@@ -249,6 +249,8 @@ async def check_proposal_updates(limit: int = 20) -> dict:
             if prev:
                 if prev.get("opened") != state.get("opened") and state.get("opened"):
                     diff.append("client OPENED your proposal")
+                if state.get("interview") and not prev.get("interview"):
+                    diff.append("client MESSAGED you / interview activity")
                 ph, ch = prev.get("hiring") or {}, state.get("hiring") or {}
                 if ch.get("opened", 0) > ph.get("opened", 0):
                     diff.append(f"opened count {ph.get('opened',0)}→{ch.get('opened',0)}")
