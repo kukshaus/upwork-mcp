@@ -95,3 +95,21 @@ async def test_search_jobs_is_patchable(monkeypatch):
         res = await c.call_tool("upwork_search_jobs", {"query": "mcp server", "limit": 5})
     assert seen["query"] == "mcp server"
     assert json.loads(res.content[0].text)[0]["title"] == "fake"
+
+
+async def test_browser_tools_run_one_at_a_time(monkeypatch):
+    """Parallel calls share one Chrome tab; overlapping navigations abort each other."""
+    import asyncio
+    active = {"now": 0, "max": 0}
+
+    async def slow_search(params):
+        active["now"] += 1
+        active["max"] = max(active["max"], active["now"])
+        await asyncio.sleep(0.05)
+        active["now"] -= 1
+        return [{"title": params.query}]
+
+    monkeypatch.setattr(server, "search_jobs", slow_search)
+    async with Client(server.mcp) as c:
+        await asyncio.gather(*[c.call_tool("upwork_search_jobs", {"query": q}) for q in "abcd"])
+    assert active["max"] == 1

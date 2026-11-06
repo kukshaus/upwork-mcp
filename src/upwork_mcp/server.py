@@ -6,6 +6,7 @@ from contextlib import asynccontextmanager
 from typing import Annotated, AsyncIterator
 
 from fastmcp import FastMCP
+from fastmcp.server.middleware import Middleware, MiddlewareContext
 from pydantic import Field
 
 from . import __version__
@@ -48,6 +49,28 @@ READ_LOCAL = {"readOnlyHint": True, "openWorldHint": False}
 SPENDS = {"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False, "openWorldHint": True}
 
 
+# Tools that never touch the browser and may run concurrently.
+LOCAL_TOOLS = {"upwork_list_bids", "upwork_check_already_applied"}
+
+
+class SerializeBrowserTools(Middleware):
+    """Run browser tools one at a time.
+
+    Every tool drives the same Chrome tab. When a client fires tool calls in
+    parallel, one page.goto() cancels another and both fail with
+    net::ERR_ABORTED. Queue them instead.
+    """
+
+    def __init__(self) -> None:
+        self._lock = asyncio.Lock()
+
+    async def on_call_tool(self, context: MiddlewareContext, call_next):
+        if context.message.name in LOCAL_TOOLS:
+            return await call_next(context)
+        async with self._lock:
+            return await call_next(context)
+
+
 @asynccontextmanager
 async def lifespan(_server: FastMCP) -> AsyncIterator[None]:
     """Disconnect from Chrome when the server shuts down (Chrome itself keeps running)."""
@@ -66,6 +89,7 @@ mcp = FastMCP(
         "upwork_check_already_applied first to avoid duplicate bids."
     ),
     lifespan=lifespan,
+    middleware=[SerializeBrowserTools()],
 )
 
 

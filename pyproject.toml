@@ -1,6 +1,6 @@
 [project]
 name = "upwork-mcp"
-version = "0.3.0"
+version = "0.3.1"
 description = "MCP server for Upwork via browser automation"
 readme = "README.md"
 requires-python = ">=3.12"
