@@ -36,3 +36,33 @@ async def test_browser_close(browser):
     await browser.close()
     assert browser._page is None
     assert browser._context is None
+
+
+@pytest.mark.parametrize("targets,expect_open", [
+    ([], True),                                        # Chrome alive, all tabs closed
+    ([{"type": "service_worker"}], True),
+    ([{"type": "page", "url": "about:blank"}], False),
+])
+def test_ensure_page_target(monkeypatch, targets, expect_open):
+    """Zero page targets breaks connect_over_cdp; ensure_page_target opens one."""
+    import io
+    import json
+    import urllib.request
+    from upwork_mcp.browser import client
+
+    calls = []
+
+    class Resp(io.BytesIO):
+        def __enter__(self):
+            return self
+        def __exit__(self, *a):
+            return False
+
+    def fake_urlopen(req, timeout=None):
+        url = req if isinstance(req, str) else req.full_url
+        calls.append(url)
+        return Resp(json.dumps(targets).encode() if url.endswith("/list") else b"{}")
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    assert client.ensure_page_target() is expect_open
+    assert any("/json/new" in u for u in calls) is expect_open

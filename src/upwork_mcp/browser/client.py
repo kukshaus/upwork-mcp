@@ -2,6 +2,7 @@
 
 import asyncio
 import subprocess
+import sys
 import os
 import time
 from pathlib import Path
@@ -39,6 +40,31 @@ def is_chrome_running_with_debug() -> bool:
         return False
 
 
+def ensure_page_target() -> bool:
+    """Make sure the debug Chrome has at least one page (tab) open.
+
+    On macOS Chrome keeps running after its last window is closed. With zero
+    page targets, CDP rejects Playwright's connect handshake with
+    "Browser.setDownloadBehavior: Browser context management is not supported".
+    Opening an about:blank tab through the DevTools HTTP endpoint fixes it.
+    Returns True if a tab had to be opened.
+    """
+    import json
+    import urllib.request
+    base = f"http://127.0.0.1:{CDP_PORT}/json"
+    try:
+        with urllib.request.urlopen(f"{base}/list", timeout=2) as resp:
+            targets = json.loads(resp.read() or b"[]")
+        if any(t.get("type") == "page" for t in targets):
+            return False
+        req = urllib.request.Request(f"{base}/new?about:blank", method="PUT")
+        with urllib.request.urlopen(req, timeout=5):
+            pass
+        return True
+    except Exception:
+        return False
+
+
 def start_chrome_with_debug() -> bool:
     """Start Chrome with remote debugging enabled."""
     chrome_path = find_chrome()
@@ -47,18 +73,21 @@ def start_chrome_with_debug() -> bool:
 
     PROFILE_DIR.mkdir(parents=True, exist_ok=True)
 
-    # Start Chrome with debugging port
-    subprocess.Popen(
-        [
-            chrome_path,
-            f"--remote-debugging-port={CDP_PORT}",
-            f"--user-data-dir={PROFILE_DIR}",
-            "--no-first-run",
-            "--no-default-browser-check",
-        ],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
+    chrome_args = [
+        f"--remote-debugging-port={CDP_PORT}",
+        f"--user-data-dir={PROFILE_DIR}",
+        "--no-first-run",
+        "--no-default-browser-check",
+    ]
+    if "/Contents/MacOS/" in chrome_path:
+        # macOS: launch via `open -g` so the automation Chrome opens BEHIND
+        # the frontmost app instead of stealing focus from the user.
+        app_bundle = chrome_path.split("/Contents/MacOS/")[0]
+        cmd = ["/usr/bin/open", "-n", "-g", "-a", app_bundle, "--args", *chrome_args]
+    else:
+        cmd = [chrome_path, *chrome_args]
+
+    subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     # Wait for Chrome to start
     for _ in range(10):
@@ -88,13 +117,17 @@ class UpworkBrowser:
 
         # Ensure Chrome is running with debug port
         if not is_chrome_running_with_debug():
-            print("Starting Chrome with debug port...")
+            print("Starting Chrome with debug port...", file=sys.stderr)
             if not start_chrome_with_debug():
                 raise RuntimeError(
                     f"Could not start Chrome. Please start it manually with:\n"
                     f'"{find_chrome()}" --remote-debugging-port={CDP_PORT}'
                 )
             await asyncio.sleep(2)
+
+        if ensure_page_target():
+            print("Debug Chrome had no open tabs; opened about:blank.", file=sys.stderr)
+            await asyncio.sleep(0.5)
 
         self._playwright = await async_playwright().start()
 
@@ -149,7 +182,7 @@ class UpworkBrowser:
 
             # Check for Cloudflare (still showing)
             if "moment" in title.lower():
-                print("Cloudflare challenge detected. Please solve it in the browser window.")
+                print("Cloudflare challenge detected. Please solve it in the browser window.", file=sys.stderr)
                 return False
 
             # Check for login redirect
@@ -158,7 +191,7 @@ class UpworkBrowser:
 
             return True
         except Exception as e:
-            print(f"Login check error: {e}")
+            print(f"Login check error: {e}", file=sys.stderr)
             return False
 
     async def ensure_logged_in(self) -> bool:

@@ -2,6 +2,8 @@
 
 MCP (Model Context Protocol) server for Upwork via browser automation. Enables Claude Code to search jobs, manage proposals, messages, and contracts on Upwork.
 
+Built on [FastMCP](https://github.com/PrefectHQ/fastmcp) 4.x. Every tool carries MCP annotations (`readOnlyHint`, `destructiveHint`, ...) and tags (`jobs`, `profile`, `proposals`, `messages`, `contracts`, `session`, `tracker`), so clients can tell read-only tools from ones that spend Connects (`upwork_submit_proposal`, `upwork_withdraw_proposal`).
+
 ## Features
 
 - **Job Search**: Search and filter Upwork jobs by keywords, budget, experience level, etc.
@@ -142,7 +144,10 @@ Options:
   --logout       Clear saved session
   --no-headless  Show browser window (debugging)
   --timeout MS   Page timeout in milliseconds (default: 30000)
-  --transport    MCP transport type (default: stdio)
+  --transport    MCP transport: stdio (default) or http
+  --host HOST    Bind host for --transport http (default: 127.0.0.1)
+  --port PORT    Bind port for --transport http (default: 8000)
+  --version      Print version and exit
 ```
 
 ## Development
@@ -199,6 +204,10 @@ Run with visible browser to solve manually:
 ```bash
 uvx upwork-mcp --no-headless
 ```
+
+### "Browser context management is not supported"
+
+On macOS, Chrome keeps running after its last window closes, and a debug Chrome with zero tabs rejects the CDP handshake with this error. Since 0.2.0 the server opens an `about:blank` tab automatically before connecting. On older versions, open any tab in the automation Chrome (or `curl -X PUT "http://127.0.0.1:9222/json/new?about:blank"`).
 
 ### Browser not found
 

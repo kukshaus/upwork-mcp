@@ -2,11 +2,15 @@
 
 import argparse
 import asyncio
-from typing import Annotated
-from mcp.server.fastmcp import FastMCP
+from contextlib import asynccontextmanager
+from typing import Annotated, AsyncIterator
+
+from fastmcp import FastMCP
 from pydantic import Field
 
-from .browser.client import get_browser, close_browser, UpworkBrowser
+from . import __version__
+
+from .browser.client import get_browser, close_browser
 from .browser.auth import login_interactive, check_session, logout
 from . import tracker
 from .tools.jobs import JobSearchParams, JobDetailsParams, search_jobs, get_job_details, get_best_matches
@@ -35,10 +39,33 @@ from .tools.contracts import (
     get_work_diary,
 )
 
-# Initialize FastMCP server
+# Tool annotation presets (MCP ToolAnnotations hints for clients).
+# READ_UPWORK: reads live Upwork pages, changes nothing.
+READ_UPWORK = {"readOnlyHint": True, "openWorldHint": True}
+# READ_LOCAL: reads the local bid tracker only.
+READ_LOCAL = {"readOnlyHint": True, "openWorldHint": False}
+# SPENDS: irreversible action on Upwork (spends Connects / withdraws a bid).
+SPENDS = {"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False, "openWorldHint": True}
+
+
+@asynccontextmanager
+async def lifespan(_server: FastMCP) -> AsyncIterator[None]:
+    """Disconnect from Chrome when the server shuts down (Chrome itself keeps running)."""
+    try:
+        yield
+    finally:
+        await close_browser()
+
+
 mcp = FastMCP(
     name="upwork-mcp",
-    instructions="Upwork MCP Server - Search jobs, manage proposals, messages, and contracts via browser automation",
+    version=__version__,
+    instructions=(
+        "Upwork MCP Server - Search jobs, manage proposals, messages, and contracts "
+        "via browser automation. upwork_submit_proposal spends Connects; call "
+        "upwork_check_already_applied first to avoid duplicate bids."
+    ),
+    lifespan=lifespan,
 )
 
 
@@ -47,7 +74,7 @@ mcp = FastMCP(
 # ============================================================================
 
 
-@mcp.tool()
+@mcp.tool(tags={"jobs"}, annotations=READ_UPWORK)
 async def upwork_search_jobs(
     query: Annotated[str, Field(description="Search keywords")],
     category: Annotated[str | None, Field(description="Job category filter")] = None,
@@ -75,7 +102,7 @@ async def upwork_search_jobs(
     return await search_jobs(params)
 
 
-@mcp.tool()
+@mcp.tool(tags={"jobs"}, annotations=READ_UPWORK)
 async def upwork_get_job_details(
     job_url: Annotated[str, Field(description="Full Upwork job URL or job ID")]
 ) -> dict:
@@ -88,7 +115,7 @@ async def upwork_get_job_details(
     return await get_job_details(params)
 
 
-@mcp.tool()
+@mcp.tool(tags={"jobs"}, annotations=READ_UPWORK)
 async def upwork_get_best_matches(
     limit: Annotated[int, Field(description="Max jobs to return", ge=1, le=50)] = 30
 ) -> list[dict]:
@@ -106,7 +133,7 @@ async def upwork_get_best_matches(
 # ============================================================================
 
 
-@mcp.tool()
+@mcp.tool(tags={"profile"}, annotations=READ_UPWORK)
 async def upwork_get_my_profile() -> dict:
     """Get your Upwork freelancer profile information.
 
@@ -116,7 +143,7 @@ async def upwork_get_my_profile() -> dict:
     return await get_my_profile()
 
 
-@mcp.tool()
+@mcp.tool(tags={"profile"}, annotations=READ_UPWORK)
 async def upwork_get_connects_balance() -> dict:
     """Get current Upwork Connects balance.
 
@@ -125,7 +152,7 @@ async def upwork_get_connects_balance() -> dict:
     return await get_connects_balance()
 
 
-@mcp.tool()
+@mcp.tool(tags={"profile"}, annotations=READ_UPWORK)
 async def upwork_get_profile_stats() -> dict:
     """Get profile statistics including earnings and work history.
 
@@ -139,7 +166,7 @@ async def upwork_get_profile_stats() -> dict:
 # ============================================================================
 
 
-@mcp.tool()
+@mcp.tool(tags={"proposals"}, annotations=READ_UPWORK)
 async def upwork_get_proposals(
     status: Annotated[
         str, Field(description="Filter by status: active, submitted, archived, or all")
@@ -154,7 +181,7 @@ async def upwork_get_proposals(
     return await get_proposals(params)
 
 
-@mcp.tool()
+@mcp.tool(tags={"proposals"}, annotations=READ_UPWORK)
 async def upwork_get_proposal_details(
     proposal_url: Annotated[str, Field(description="URL to the proposal")]
 ) -> dict:
@@ -165,7 +192,7 @@ async def upwork_get_proposal_details(
     return await get_proposal_details(proposal_url)
 
 
-@mcp.tool()
+@mcp.tool(tags={"proposals"}, annotations=SPENDS)
 async def upwork_submit_proposal(
     job_url: Annotated[str, Field(description="Full Upwork job URL")],
     cover_letter: Annotated[str, Field(description="Cover letter content")],
@@ -192,7 +219,7 @@ async def upwork_submit_proposal(
     return await submit_proposal(params)
 
 
-@mcp.tool()
+@mcp.tool(tags={"proposals"}, annotations=SPENDS)
 async def upwork_withdraw_proposal(
     proposal_url: Annotated[str, Field(description="URL to the proposal to withdraw")]
 ) -> dict:
@@ -208,7 +235,7 @@ async def upwork_withdraw_proposal(
 # ============================================================================
 
 
-@mcp.tool()
+@mcp.tool(tags={"messages"}, annotations=READ_UPWORK)
 async def upwork_get_messages(
     room_id: Annotated[str | None, Field(description="Specific chat room ID or URL")] = None,
     unread_only: Annotated[bool, Field(description="Only show unread messages")] = False,
@@ -222,7 +249,7 @@ async def upwork_get_messages(
     return await get_messages(params)
 
 
-@mcp.tool()
+@mcp.tool(tags={"messages"}, annotations=READ_UPWORK)
 async def upwork_get_conversation(
     room_id: Annotated[str, Field(description="Chat room ID or URL")],
     limit: Annotated[int, Field(description="Maximum messages to return", ge=1, le=100)] = 50,
@@ -234,7 +261,7 @@ async def upwork_get_conversation(
     return await get_conversation_messages(room_id, limit)
 
 
-@mcp.tool()
+@mcp.tool(tags={"messages"}, annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True})
 async def upwork_send_message(
     room_id: Annotated[str, Field(description="Chat room ID or URL")],
     message: Annotated[str, Field(description="Message content to send")],
@@ -247,7 +274,7 @@ async def upwork_send_message(
     return await send_message(params)
 
 
-@mcp.tool()
+@mcp.tool(tags={"messages"}, annotations=READ_UPWORK)
 async def upwork_get_unread_count() -> dict:
     """Get count of unread messages.
 
@@ -261,7 +288,7 @@ async def upwork_get_unread_count() -> dict:
 # ============================================================================
 
 
-@mcp.tool()
+@mcp.tool(tags={"contracts"}, annotations=READ_UPWORK)
 async def upwork_get_contracts(
     status: Annotated[str, Field(description="Filter by status: active, ended, or all")] = "active",
     limit: Annotated[int, Field(description="Maximum number of results", ge=1, le=50)] = 20,
@@ -274,7 +301,7 @@ async def upwork_get_contracts(
     return await get_contracts(params)
 
 
-@mcp.tool()
+@mcp.tool(tags={"contracts"}, annotations=READ_UPWORK)
 async def upwork_get_contract_details(
     contract_url: Annotated[str, Field(description="URL to the contract")]
 ) -> dict:
@@ -285,7 +312,7 @@ async def upwork_get_contract_details(
     return await get_contract_details(contract_url)
 
 
-@mcp.tool()
+@mcp.tool(tags={"contracts"}, annotations=READ_UPWORK)
 async def upwork_get_work_diary(
     contract_url: Annotated[str, Field(description="URL to the contract")],
     week_offset: Annotated[int, Field(description="0 for current week, 1 for last week, etc.")] = 0,
@@ -302,7 +329,7 @@ async def upwork_get_work_diary(
 # ============================================================================
 
 
-@mcp.tool()
+@mcp.tool(tags={"session"}, annotations=READ_UPWORK)
 async def upwork_check_session() -> dict:
     """Check if the current Upwork session is valid.
 
@@ -320,7 +347,7 @@ async def upwork_check_session() -> dict:
         return {"logged_in": False, "error": str(e)}
 
 
-@mcp.tool()
+@mcp.tool(tags={"proposals"}, annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True})
 async def upwork_check_proposal_updates(
     limit: Annotated[int, Field(description="Max proposals to check", ge=1, le=50)] = 20,
 ) -> dict:
@@ -334,7 +361,7 @@ async def upwork_check_proposal_updates(
     return await check_proposal_updates(limit=limit)
 
 
-@mcp.tool()
+@mcp.tool(tags={"tracker"}, annotations=READ_LOCAL)
 async def upwork_list_bids(
     limit: Annotated[int, Field(description="Maximum number of tracked bids to return", ge=1, le=200)] = 100,
 ) -> list[dict]:
@@ -347,7 +374,7 @@ async def upwork_list_bids(
     return tracker.list_bids(limit=limit)
 
 
-@mcp.tool()
+@mcp.tool(tags={"tracker"}, annotations=READ_LOCAL)
 async def upwork_check_already_applied(
     job_url: Annotated[str, Field(description="Full Upwork job URL or job ID")],
 ) -> dict:
@@ -358,7 +385,7 @@ async def upwork_check_already_applied(
     return {"already_applied": tracker.has_bid(job_url), "bid": tracker.get_bid(job_url)}
 
 
-@mcp.tool()
+@mcp.tool(tags={"session"}, annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False})
 async def upwork_close_session() -> dict:
     """Close browser session and cleanup resources.
 
@@ -415,10 +442,13 @@ Examples:
     )
     parser.add_argument(
         "--transport",
-        choices=["stdio"],
+        choices=["stdio", "http"],
         default="stdio",
         help="MCP transport type (default: stdio)",
     )
+    parser.add_argument("--host", default="127.0.0.1", help="Bind host for --transport http")
+    parser.add_argument("--port", type=int, default=8000, help="Bind port for --transport http")
+    parser.add_argument("--version", action="version", version=f"upwork-mcp {__version__}")
 
     args = parser.parse_args()
 
@@ -443,13 +473,16 @@ Examples:
         return
 
     # Initialize browser with settings
-    browser = get_browser(
+    get_browser(
         headless=not args.no_headless,
         timeout=args.timeout,
     )
 
-    # Run MCP server
-    mcp.run(transport=args.transport)
+    # Run MCP server. No banner: on stdio, stdout belongs to the JSON-RPC stream.
+    if args.transport == "http":
+        mcp.run(transport="http", host=args.host, port=args.port, show_banner=False)
+    else:
+        mcp.run(transport="stdio", show_banner=False)
 
 
 if __name__ == "__main__":
